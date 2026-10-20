@@ -135,22 +135,31 @@ call `is_verified()` on it during initialization.
 
 ## Multi-sig Admin
 
+For the end-to-end Testnet runbook, including signer creation, threshold
+setup, contract initialization, signer rotation, pause/upgrade/ownership
+actions, and emergency recovery, see
+[docs/MULTISIG_ADMIN.md](docs/MULTISIG_ADMIN.md). This section is a short
+summary; the runbook is authoritative for command syntax.
+
 Each protocol contract with an `admin` parameter accepts a Stellar account
 address as its admin. A classic Stellar account can require multiple signers
 for authorization by configuring its signer weights and thresholds; Soroban
 then checks the account's configured threshold when the admin authorizes a
-contract call. Configure this before
-deploying contracts and pass the multisig account's `G...` address as `admin`
-to each `initialize()` call. Keep the individual signer secret keys separate.
-The bundled deployment scripts currently set admin to the deployer's address;
-for a multisig deployment, initialize each contract with the multisig address
-and submit those initialization transactions with the multisig threshold met.
+contract call. Configure this before or immediately after deploying contracts
+and pass the multisig account's `G...` address as `admin` to each
+`initialize()` call. Keep the individual signer secret keys separate. The
+bundled deployment scripts currently set admin to the deployer's address; for
+a multisig deployment, initialize each contract with the multisig address and
+submit those initialization transactions with the multisig threshold met. The
+runbook shows both a bootstrap-then-harden flow that reuses `deploy.sh` and a
+manual flow that initializes an already-hardened account.
 
 ### Testnet Example: 3-of-5
 
-Create and fund five testnet signer accounts, then use Stellar Laboratory's
-Testnet transaction builder to submit `Set Options` operations from the admin
-account with these settings:
+Create and fund five testnet signer accounts, then submit `Set Options`
+operations from the admin account with these settings. The exact
+`stellar tx new set-options` ceremony is in
+[docs/MULTISIG_ADMIN.md#1-create-the-3-of-5-admin-account](docs/MULTISIG_ADMIN.md#1-create-the-3-of-5-admin-account).
 
 | Signer | Weight |
 |--------|--------|

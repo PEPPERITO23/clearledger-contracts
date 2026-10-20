@@ -259,7 +259,9 @@ are provided where available.
 
 ### Smart Contracts
 
-- Multi-sig admin (3-of-5 Stellar signers)
+- Multisig-aware deployment automation. Account-level 3-of-5 admin is
+  documented in [MULTISIG_ADMIN.md](MULTISIG_ADMIN.md), but the deployment
+  scripts still initialize contracts with the deployer address.
 - LP-governed invoice funding (stake LP tokens to vote on invoices). Design
   proposal: [NEW_DESIGN.md](NEW_DESIGN.md) (issue #718)
 - Dynamic utilization-based interest rate model
@@ -273,7 +275,10 @@ are provided where available.
 - `cargo-soroban` integration for automated WASM budget reporting
 - TypeScript SDK for contract interaction
 - Automated fuzz testing across all four contracts
-- Smart-contract upgrade mechanism (`__constructor` + `__upgrade`)
+- Smart-contract upgrade coverage: `invoice` and `escrow` expose an
+  admin-only `upgrade(new_wasm_hash)`, but `registry`, `pool`, and
+  `pool_factory` have no in-place upgrade entry point. See
+  [MULTISIG_ADMIN.md](MULTISIG_ADMIN.md#contract-authority-map).
 
 > **Note:** Partial repayments are now supported on the **escrow** path
 > (`escrow::release_to_pool(invoice_id, repayment_amount)` accepts a
