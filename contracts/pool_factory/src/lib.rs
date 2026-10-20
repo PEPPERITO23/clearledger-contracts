@@ -72,6 +72,10 @@ impl PoolFactoryContract {
     /// * `env` - The Soroban environment.
     /// * `asset` - The asset the new pool instance custodies. Passed to the
     ///   pool as its `funding_asset`, the single asset that instance supports.
+    ///   For native XLM this must be the network's Stellar Asset Contract
+    ///   address (Testnet
+    ///   `CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC`), never
+    ///   the string `native` or an issuer account. See `docs/NATIVE_XLM.md`.
     /// * `pool_wasm_hash` - Hash of the uploaded pool Wasm to deploy. Must
     ///   already be present in the ledger.
     /// * `invoice_contract` - The invoice contract the new pool funds invoices
@@ -167,7 +171,8 @@ impl PoolFactoryContract {
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
-    /// * `asset` - The asset address to register.
+    /// * `asset` - The asset address to register. For native XLM, pass the
+    ///   network's Stellar Asset Contract address; see `register_asset`.
     /// * `pool_address` - The existing pool contract address.
     ///
     /// # Auth
