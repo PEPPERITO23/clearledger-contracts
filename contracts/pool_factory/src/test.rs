@@ -941,6 +941,254 @@ fn test_pool_instances_do_not_cross_contaminate() {
     assert_eq!(stats2.total_shares, 30_000_000);
 }
 
+/// Proves that two factory-deployed pools for different assets keep deposits,
+/// shares and token custody fully separate, including across a withdrawal.
+#[test]
+fn test_two_asset_pools_isolate_deposits_shares_and_balances() {
+    let te = setup();
+    let asset_a = te.env.register_contract(None, MockToken);
+    let asset_b = te.env.register_contract(None, MockToken);
+
+    let pool_a_address = register_asset(&te, &asset_a);
+    let pool_b_address = register_asset(&te, &asset_b);
+
+    // Factory lookups are asset-scoped: each asset resolves to exactly its own
+    // instance, and an address with no registration resolves to nothing.
+    assert_eq!(
+        te.factory.get_pool_for_asset(&asset_a),
+        Some(pool_a_address.clone())
+    );
+    assert_eq!(
+        te.factory.get_pool_for_asset(&asset_b),
+        Some(pool_b_address.clone())
+    );
+    assert_ne!(pool_a_address, pool_b_address);
+    assert_eq!(
+        te.factory.get_pool_for_asset(&Address::generate(&te.env)),
+        None
+    );
+    let listed = te.factory.list_assets();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed.get(0), Some(asset_a.clone()));
+    assert_eq!(listed.get(1), Some(asset_b.clone()));
+
+    let pool_a = PoolContractClient::new(&te.env, &pool_a_address);
+    let pool_b = PoolContractClient::new(&te.env, &pool_b_address);
+    assert_eq!(pool_a.get_funding_asset(), asset_a);
+    assert_eq!(pool_b.get_funding_asset(), asset_b);
+
+    let lp_a = Address::generate(&te.env);
+    let lp_b = Address::generate(&te.env);
+    let token_a = MockTokenClient::new(&te.env, &asset_a);
+    let token_b = MockTokenClient::new(&te.env, &asset_b);
+
+    // Seed each LP with only the token of the pool it deposits into. If either
+    // pool reached across assets, the deposit would fail against the token it
+    // does not hold.
+    te.env.as_contract(&asset_a, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&TKey(lp_a.clone()), &100_000_000_000i128);
+    });
+    te.env.as_contract(&asset_b, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&TKey(lp_b.clone()), &100_000_000_000i128);
+    });
+
+    pool_a.deposit(&lp_a, &2_000_000_000);
+    pool_b.deposit(&lp_b, &4_000_000_000);
+
+    let stats_a = pool_a.get_stats();
+    let stats_b = pool_b.get_stats();
+    assert_eq!(stats_a.total_deposits, 2_000_000_000);
+    assert_eq!(stats_a.total_shares, 2_000_000_000);
+    assert_eq!(stats_b.total_deposits, 4_000_000_000);
+    assert_eq!(stats_b.total_shares, 4_000_000_000);
+    assert_eq!(stats_a.total_funded, 0);
+    assert_eq!(stats_b.total_funded, 0);
+    assert_eq!(stats_a.utilization_rate_bps, 0);
+    assert_eq!(stats_b.utilization_rate_bps, 0);
+
+    // Token custody is per-instance as well.
+    assert_eq!(token_a.balance(&pool_a_address), 2_000_000_000);
+    assert_eq!(token_a.balance(&pool_b_address), 0);
+    assert_eq!(token_b.balance(&pool_b_address), 4_000_000_000);
+    assert_eq!(token_b.balance(&pool_a_address), 0);
+
+    // Withdrawing from pool A must not burn shares or release tokens from B.
+    pool_a.withdraw(&lp_a, &1_000_000_000);
+    let stats_a_after = pool_a.get_stats();
+    let stats_b_after = pool_b.get_stats();
+    assert_eq!(stats_a_after.total_deposits, 1_000_000_000);
+    assert_eq!(stats_a_after.total_shares, 1_000_000_000);
+    assert_eq!(stats_b_after.total_deposits, 4_000_000_000);
+    assert_eq!(stats_b_after.total_shares, 4_000_000_000);
+    assert_eq!(token_a.balance(&pool_a_address), 1_000_000_000);
+    assert_eq!(token_b.balance(&pool_b_address), 4_000_000_000);
+}
+
+/// Proves that invoice eligibility, funded totals and utilization are scoped to
+/// the asset a pool was deployed for: an invoice in asset A cannot be funded by
+/// pool B, and funding one pool leaves the other's counters untouched.
+#[test]
+fn test_two_asset_pools_isolate_funding_utilization_and_invoice_eligibility() {
+    let te = setup();
+    te.env.budget().reset_unlimited();
+
+    let asset_a = te.env.register_contract(None, MockToken);
+    let asset_b = te.env.register_contract(None, MockToken);
+    let invoice = InvoiceContractClient::new(&te.env, &te.invoice_id);
+    invoice.add_supported_asset(&asset_a);
+    invoice.add_supported_asset(&asset_b);
+
+    let pool_a_address = register_asset(&te, &asset_a);
+    let pool_b_address = register_asset(&te, &asset_b);
+    let pool_a = PoolContractClient::new(&te.env, &pool_a_address);
+    let pool_b = PoolContractClient::new(&te.env, &pool_b_address);
+
+    let issuer = Address::generate(&te.env);
+    let buyer = Address::generate(&te.env);
+    let lp_a = Address::generate(&te.env);
+    let lp_b = Address::generate(&te.env);
+    let registry = RegistryContractClient::new(&te.env, &te.registry_id);
+    let metadata: Map<String, String> = Map::new(&te.env);
+    registry.register_issuer(&issuer, &metadata);
+    registry.register_buyer(&buyer, &metadata);
+    registry.verify_profile(&issuer, &true);
+    registry.verify_profile(&buyer, &true);
+
+    for asset in [&asset_a, &asset_b] {
+        te.env.as_contract(asset, || {
+            te.env
+                .storage()
+                .persistent()
+                .set(&TKey(lp_a.clone()), &100_000_000_000i128);
+            te.env
+                .storage()
+                .persistent()
+                .set(&TKey(lp_b.clone()), &100_000_000_000i128);
+            te.env
+                .storage()
+                .persistent()
+                .set(&TKey(buyer.clone()), &100_000_000_000i128);
+        });
+    }
+    pool_a.deposit(&lp_a, &2_000_000_000);
+    pool_b.deposit(&lp_b, &2_000_000_000);
+
+    let invoice_a = create_listed_invoice(&te, &issuer, &buyer, &asset_a);
+    let invoice_b = create_listed_invoice(&te, &issuer, &buyer, &asset_b);
+
+    // Cross-asset funding is rejected before any pool accounting moves.
+    let wrong_a = pool_a.try_fund_invoice(&invoice_b);
+    let wrong_b = pool_b.try_fund_invoice(&invoice_a);
+    assert!(
+        std::format!("{wrong_a:?}").contains("#11"),
+        "expected AssetMismatch, got {wrong_a:?}"
+    );
+    assert!(
+        std::format!("{wrong_b:?}").contains("#11"),
+        "expected AssetMismatch, got {wrong_b:?}"
+    );
+    for stats in [pool_a.get_stats(), pool_b.get_stats()] {
+        assert_eq!(stats.total_funded, 0);
+        assert_eq!(stats.utilization_rate_bps, 0);
+        assert_eq!(stats.active_invoice_count, 0);
+        assert_eq!(stats.available_liquidity, 2_000_000_000);
+    }
+    assert_eq!(invoice.get_status(&invoice_a), 1);
+    assert_eq!(invoice.get_status(&invoice_b), 1);
+
+    // Fund A only: A's funded total and utilization move, B's stay zero.
+    invoice.set_pool_contract(&pool_a_address);
+    assert!(pool_a.fund_invoice(&invoice_a));
+
+    let funded_amount = 1_000_000_000u128 * 9_800 / 10_000;
+    let stats_a = pool_a.get_stats();
+    let stats_b = pool_b.get_stats();
+    assert_eq!(stats_a.total_funded, funded_amount);
+    assert_eq!(stats_a.utilization_rate_bps, 4_900);
+    assert_eq!(stats_a.active_invoice_count, 1);
+    assert_eq!(stats_a.available_liquidity, 2_000_000_000 - funded_amount);
+    assert_eq!(stats_b.total_funded, 0);
+    assert_eq!(stats_b.utilization_rate_bps, 0);
+    assert_eq!(stats_b.active_invoice_count, 0);
+    assert_eq!(stats_b.available_liquidity, 2_000_000_000);
+    assert_eq!(invoice.get_status(&invoice_a), 2);
+    assert_eq!(invoice.get_status(&invoice_b), 1);
+
+    // Pool B can still fund its own asset, and the two ledgers remain
+    // independent rather than sharing a global funded counter.
+    invoice.set_pool_contract(&pool_b_address);
+    assert!(pool_b.fund_invoice(&invoice_b));
+
+    let stats_a = pool_a.get_stats();
+    let stats_b = pool_b.get_stats();
+    assert_eq!(stats_a.total_funded, funded_amount);
+    assert_eq!(stats_b.total_funded, funded_amount);
+    assert_eq!(stats_a.utilization_rate_bps, 4_900);
+    assert_eq!(stats_b.utilization_rate_bps, 4_900);
+    assert_eq!(stats_a.active_invoice_count, 1);
+    assert_eq!(stats_b.active_invoice_count, 1);
+    assert_eq!(stats_a.available_liquidity, 2_000_000_000 - funded_amount);
+    assert_eq!(stats_b.available_liquidity, 2_000_000_000 - funded_amount);
+
+    // The factory's aggregate view reads each instance's own ledger.
+    let aggregate = te.factory.get_aggregate_stats();
+    assert_eq!(aggregate.len(), 2);
+    assert_eq!(aggregate.get(0).unwrap().0, pool_a_address);
+    assert_eq!(aggregate.get(1).unwrap().0, pool_b_address);
+    assert_pool_stats_equal(aggregate.get(0).unwrap().1, stats_a);
+    assert_pool_stats_equal(aggregate.get(1).unwrap().1, stats_b);
+}
+
+/// Registration must not record a pool when the escrow it is wired to custodies
+/// a different asset: the pool initializer rejects the mismatch before the
+/// factory writes its asset -> pool mapping.
+#[test]
+fn test_register_asset_rejects_escrow_asset_mismatch_without_recording_pool() {
+    let te = setup();
+    let other_asset = te.env.register_contract(None, MockToken);
+
+    // `te.escrow_id` was initialized for `te.asset`, not `other_asset`.
+    let result = te.factory.try_register_asset(
+        &other_asset,
+        &te.pool_wasm_hash,
+        &te.invoice_id,
+        &te.escrow_id,
+    );
+    assert!(
+        std::format!("{result:?}").contains("#20"),
+        "expected EscrowAssetMismatch, got {result:?}"
+    );
+
+    assert_eq!(te.factory.get_pool_for_asset(&other_asset), None);
+    assert_eq!(te.factory.get_pool_for_asset(&te.asset), None);
+    assert_eq!(te.factory.list_assets().len(), 0);
+}
+
+/// A wrong-asset `register_existing_pool` is rejected and leaves the factory's
+/// mapping/index untouched, so a failed migration cannot poison an asset lookup.
+#[test]
+fn test_register_existing_pool_wrong_asset_does_not_record_mapping() {
+    let te = setup();
+    let other_asset = Address::generate(&te.env);
+    let other_pool = new_initialized_pool(&te, &other_asset);
+
+    let result = te.factory.try_register_existing_pool(&te.asset, &other_pool);
+    assert!(
+        std::format!("{result:?}").contains("#5"),
+        "expected InvalidPool, got {result:?}"
+    );
+
+    assert_eq!(te.factory.get_pool_for_asset(&te.asset), None);
+    assert_eq!(te.factory.get_pool_for_asset(&other_asset), None);
+    assert_eq!(te.factory.list_assets().len(), 0);
+}
+
 #[test]
 fn test_get_aggregate_stats() {
     let te = setup();
